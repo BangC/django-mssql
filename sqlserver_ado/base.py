@@ -4,21 +4,80 @@ from __future__ import absolute_import, unicode_literals
 import warnings
 
 from django.core.exceptions import ImproperlyConfigured, ValidationError
-from django.db.backends.base.base import BaseDatabaseWrapper
-from django.db.backends.base.client import BaseDatabaseClient
-from django.db.backends.base.validation import BaseDatabaseValidation
-
-from django.db.utils import IntegrityError as DjangoIntegrityError
+from django.db.backends import BaseDatabaseWrapper, BaseDatabaseFeatures, BaseDatabaseValidation, BaseDatabaseClient
+from django.db.utils import IntegrityError as DjangoIntegrityError, \
+    InterfaceError as DjangoInterfaceError
+from django.utils.functional import cached_property
 
 from . import dbapi as Database
 
 from .introspection import DatabaseIntrospection
 from .creation import DatabaseCreation
-from .features import DatabaseFeatures
 from .operations import DatabaseOperations
 from .schema import DatabaseSchemaEditor
 
+try:
+    import pytz
+except ImportError:
+    pytz = None
+
 IntegrityError = Database.IntegrityError
+
+
+class DatabaseFeatures(BaseDatabaseFeatures):
+    uses_custom_query_class = True
+    has_bulk_insert = True
+
+    # DateTimeField doesn't support timezones, only DateTimeOffsetField
+    supports_timezones = False
+    supports_sequence_reset = False
+
+    can_return_id_from_insert = True
+
+    supports_regex_backreferencing = False
+
+    supports_tablespaces = True
+
+    # Django < 1.7
+    ignores_nulls_in_unique_constraints = False
+    # Django >= 1.7
+    supports_nullable_unique_constraints = False
+    supports_partially_nullable_unique_constraints = False
+
+    can_introspect_autofield = True
+    can_introspect_small_integer_field = True
+
+    supports_subqueries_in_group_by = False
+
+    allow_sliced_subqueries = False
+
+    uses_savepoints = True
+
+    supports_paramstyle_pyformat = False
+
+    closed_cursor_error_class = DjangoInterfaceError
+
+    # connection_persists_old_columns = True
+
+    requires_literal_defaults = True
+
+    @cached_property
+    def has_zoneinfo_database(self):
+        return pytz is not None
+
+    # Dict of test import path and list of versions on which it fails
+    failing_tests = {
+        # Some tests are known to fail with django-mssql.
+        'aggregation.tests.BaseAggregateTestCase.test_dates_with_aggregation': [(1, 6), (1, 7)],
+        'aggregation_regress.tests.AggregationTests.test_more_more_more': [(1, 6), (1, 7)],
+
+        # MSSQL throws an arithmetic overflow error.
+        'expressions_regress.tests.ExpressionOperatorTests.test_righthand_power': [(1, 7)],
+
+        # The migrations and schema tests also fail massively at this time.
+        'migrations.test_operations.OperationTests.test_alter_field_pk': [(1, 7)],
+
+    }
 
 
 def is_ip_address(value):
@@ -106,7 +165,6 @@ class DatabaseWrapper(BaseDatabaseWrapper):
     vendor = 'microsoft'
 
     Database = Database
-    SchemaEditorClass = DatabaseSchemaEditor
 
     operators = {
         "exact": "= %s",
@@ -121,71 +179,6 @@ class DatabaseWrapper(BaseDatabaseWrapper):
         "endswith": "LIKE %s ESCAPE '\\'",
         "istartswith": "LIKE %s ESCAPE '\\'",
         "iendswith": "LIKE %s ESCAPE '\\'",
-    }
-
-    # The patterns below are used to generate SQL pattern lookup clauses when
-    # the right-hand side of the lookup isn't a raw string (it might be an expression
-    # or the result of a bilateral transformation).
-    # In those cases, special characters for LIKE operators (e.g. \, *, _) should be
-    # escaped on database side.
-    #
-    # Note: we use str.format() here for readability as '%' is used as a wildcard for
-    # the LIKE operator.
-    pattern_esc = r"REPLACE(REPLACE(REPLACE({}, '\', '\\'), '%%', '\%%'), '_', '\_')"
-    pattern_ops = {
-        'contains': r"LIKE CONCAT('%%', {}, '%%') ESCAPE '\'",
-        'icontains': r"LIKE CONCAT('%%', {}, '%%') ESCAPE '\'",
-        'startswith': r"LIKE CONCAT({}, '%%') ESCAPE '\'",
-        'istartswith': r"LIKE CONCAT({}, '%%') ESCAPE '\'",
-        'endswith': r"LIKE CONCAT('%%', {}) ESCAPE '\'",
-        'iendswith': r"LIKE CONCAT('%%', {}) ESCAPE '\'",
-    }
-
-    # This dictionary maps Field objects to their associated Server Server column
-    # types, as strings. Column-type strings can contain format strings; they'll
-    # be interpolated against the values of Field.__dict__.
-    data_types = {
-        'AutoField':                    'int IDENTITY (1, 1)',
-        'BigAutoField':                 'bigint IDENTITY (1, 1)',
-        'BigIntegerField':              'bigint',
-        'BinaryField':                  'varbinary(max)',
-        'BooleanField':                 'bit',
-        'CharField':                    'nvarchar(%(max_length)s)',
-        'CommaSeparatedIntegerField':   'nvarchar(%(max_length)s)',
-        'DateField':                    'date',
-        'DateTimeField':                'datetime2',
-        'DateTimeOffsetField':          'datetimeoffset',
-        'DecimalField':                 'decimal(%(max_digits)s, %(decimal_places)s)',
-        'DurationField':                'bigint',
-        'FileField':                    'nvarchar(%(max_length)s)',
-        'FilePathField':                'nvarchar(%(max_length)s)',
-        'FloatField':                   'double precision',
-        'GenericIPAddressField':        'nvarchar(39)',
-        'IntegerField':                 'int',
-        'IPAddressField':               'nvarchar(15)',
-        'LegacyDateField':              'datetime',
-        'LegacyDateTimeField':          'datetime',
-        'LegacyTimeField':              'time',
-        'NewDateField':                 'date',
-        'NewDateTimeField':             'datetime2',
-        'NewTimeField':                 'time',
-        'NullBooleanField':             'bit',
-        'OneToOneField':                'int',
-        'PositiveIntegerField':         'int',
-        'PositiveSmallIntegerField':    'smallint',
-        'SlugField':                    'nvarchar(%(max_length)s)',
-        'SmallIntegerField':            'smallint',
-        'TextField':                    'nvarchar(max)',
-        'TimeField':                    'time',
-        'URLField':                     'nvarchar(%(max_length)s)',
-        'UUIDField':                    'uniqueidentifier',
-    }
-
-    # Starting with Django 1.7, check constraints are no longer included in with
-    # the data_types value.
-    data_type_check_constraints = {
-        'PositiveIntegerField': '%(qn_column)s >= 0',
-        'PositiveSmallIntegerField': '%(qn_column)s >= 0',
     }
 
     def __init__(self, *args, **kwargs):
@@ -204,12 +197,19 @@ class DatabaseWrapper(BaseDatabaseWrapper):
         except ValueError:
             self.cast_avg_to_float = False
 
-        if 'use_legacy_date_fields' in options:
-            warnings.warn(
-                "The `use_legacy_date_fields` setting is no longer supported. "
-                "If you need to use the legacy SQL 'datetime' datatype, "
-                "you must replace them with the provided model fields.",
-                DeprecationWarning)
+        USE_LEGACY_DATE_FIELDS_DEFAULT = False
+        try:
+            self.use_legacy_date_fields = bool(options.get('use_legacy_date_fields', USE_LEGACY_DATE_FIELDS_DEFAULT))
+        except ValueError:
+            self.use_legacy_date_fields = USE_LEGACY_DATE_FIELDS_DEFAULT
+
+        if self.use_legacy_date_fields:
+                warnings.warn(
+                    "The `use_legacy_date_fields` setting has been deprecated. "
+                    "The default option value has changed to 'False'. "
+                    "If you need to use the legacy SQL 'datetime' datatype, "
+                    "you must replace them with the provide model field.",
+                    DeprecationWarning)
 
         self.features = DatabaseFeatures(self)
         self.ops = DatabaseOperations(self)
@@ -347,3 +347,6 @@ class DatabaseWrapper(BaseDatabaseWrapper):
             return False
         else:
             return True
+
+    def schema_editor(self, *args, **kwargs):
+        return DatabaseSchemaEditor(self, *args, **kwargs)

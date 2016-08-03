@@ -30,11 +30,8 @@ from __future__ import absolute_import, unicode_literals
 import time
 import datetime
 import re
-import uuid
 
 import decimal
-
-from pprint import pformat
 
 from django.conf import settings
 from django.db.utils import (IntegrityError as DjangoIntegrityError,
@@ -238,8 +235,7 @@ def format_parameters(parameters, show_value=False):
             for p in parameters
         ]
 
-    return pformat(desc)
-    # return '[' + ', '.join(desc) + ']'
+    return '[' + ', '.join(desc) + ']'
 
 
 def format_decimal_as_string(value):
@@ -296,12 +292,6 @@ def _configure_parameter(p, value):
     elif isinstance(value, datetime.time):
         p.Type = adBSTR
         s = value.isoformat()
-        p.Value = s
-        p.Size = len(s)
-
-    elif isinstance(value, uuid.UUID):
-        p.Type = adBSTR
-        s = str(value)
         p.Value = s
         p.Size = len(s)
 
@@ -638,11 +628,6 @@ class Cursor(object):
         if parameter_replacements:
             operation = operation % tuple(parameter_replacements)
 
-        # Django will pass down many '%%' values. Need to convert these back to
-        # a single '%'. This will break raw SQL that includes '%%' as part of an
-        # inlined value. Those queries should use params.
-        operation = operation.replace('%%', '%')
-
         self.cmd.CommandText = operation
         self._execute_command()
 
@@ -850,7 +835,6 @@ _map_to_adotype = {
     datetime.date: adDate,
     datetime.datetime: adDate,
     datetime.time: adDate,
-    uuid.UUID: adGUID,
 }
 
 if six.PY3:

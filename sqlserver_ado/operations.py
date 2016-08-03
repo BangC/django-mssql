@@ -2,11 +2,8 @@ from __future__ import absolute_import, unicode_literals
 
 import datetime
 import django
-import uuid
 from django.conf import settings
-from django.db import utils
-from django.db.backends.base.operations import BaseDatabaseOperations
-from django.utils.encoding import force_text
+from django.db.backends import BaseDatabaseOperations
 
 try:
     from django.utils.encoding import smart_text
@@ -37,17 +34,40 @@ class DatabaseOperations(BaseDatabaseOperations):
         'NewTimeField':         mssql_fields.TimeField(),
     }
 
+    # map of sql_function: (new sql_function, new sql_template )
+    # If sql_template is None, it will not be overridden.
+    _sql_function_overrides = {
+        'STDDEV_SAMP': ('STDEV', None),
+        'STDDEV_POP': ('STDEVP', None),
+        'VAR_SAMP': ('VAR', None),
+        'VAR_POP': ('VARP', None),
+    }
+
     def __init__(self, *args, **kwargs):
         super(DatabaseOperations, self).__init__(*args, **kwargs)
 
-        self.value_to_db_datetime = self._new_value_to_db_datetime
-        self.value_to_db_time = self._new_value_to_db_time
+        if self.connection.use_legacy_date_fields:
+            self.value_to_db_datetime = self._legacy_value_to_db_datetime
+            self.value_to_db_time = self._legacy_value_to_db_time
 
-        self._convert_values_map.update({
-            'DateField':        self._convert_values_map['NewDateField'],
-            'DateTimeField':    self._convert_values_map['NewDateTimeField'],
-            'TimeField':        self._convert_values_map['NewTimeField'],
-        })
+            self._convert_values_map.update({
+                'DateField':        self._convert_values_map['LegacyDateField'],
+                'DateTimeField':    self._convert_values_map['LegacyDateTimeField'],
+                'TimeField':        self._convert_values_map['LegacyTimeField'],
+            })
+        else:
+            self.value_to_db_datetime = self._new_value_to_db_datetime
+            self.value_to_db_time = self._new_value_to_db_time
+
+            self._convert_values_map.update({
+                'DateField':        self._convert_values_map['NewDateField'],
+                'DateTimeField':    self._convert_values_map['NewDateTimeField'],
+                'TimeField':        self._convert_values_map['NewTimeField'],
+            })
+
+        if self.connection.cast_avg_to_float:
+            # Need to cast as float to avoid truncating to an int
+            self._sql_function_overrides['AVG'] = ('AVG', '%(function)s(CAST(%(field)s AS FLOAT))')
 
     def cache_key_culling_sql(self):
         return """
@@ -62,11 +82,28 @@ class DatabaseOperations(BaseDatabaseOperations):
             lookup_type = 'weekday'
         return 'DATEPART(%s, %s)' % (lookup_type, field_name)
 
-    def date_interval_sql(self, timedelta):
+    def date_interval_sql(self, sql, connector, timedelta):
         """
-        Do nothing here, we'll handle it in the combine.
+        implements the interval functionality for expressions
+        format for SQL Server.
         """
-        return timedelta, []
+        sign = 1 if connector == '+' else -1
+        if timedelta.seconds or timedelta.microseconds:
+            # assume the underlying datatype supports seconds/microseconds
+            seconds = ((timedelta.days * 86400) + timedelta.seconds) * sign
+            out = sql
+            if seconds:
+                out = 'DATEADD(SECOND, {0}, {1})'.format(seconds, sql)
+            if timedelta.microseconds:
+                # DATEADD with datetime doesn't support ms, must cast up
+                out = 'DATEADD(MICROSECOND, {ms}, CAST({sql} as datetime2))'.format(
+                    ms=timedelta.microseconds * sign,
+                    sql=out,
+                )
+        else:
+            # Only days in the delta, assume underlying datatype can DATEADD with days
+            out = 'DATEADD(DAY, {0}, {1})'.format(timedelta.days * sign, sql)
+        return out
 
     def date_trunc_sql(self, lookup_type, field_name):
         return "DATEADD(%s, DATEDIFF(%s, 0, %s), 0)" % (lookup_type, lookup_type, field_name)
@@ -132,61 +169,6 @@ class DatabaseOperations(BaseDatabaseOperations):
             reference_date=reference_date,
         )
         return sql, []
-
-    def get_db_converters(self, expression):
-        converters = super(DatabaseOperations, self).get_db_converters(expression)
-        internal_type = expression.output_field.get_internal_type()
-        if internal_type == 'TextField':
-            converters.append(self.convert_textfield_value)
-        elif internal_type in ['BooleanField', 'NullBooleanField']:
-            converters.append(self.convert_booleanfield_value)
-        elif internal_type == 'DateField':
-            converters.append(self.convert_datefield_value)
-        elif internal_type == 'DateTimeField':
-            converters.append(self.convert_datetimefield_value)
-        elif internal_type == 'TimeField':
-            converters.append(self.convert_timefield_value)
-        elif internal_type == 'UUIDField':
-            converters.append(self.convert_uuidfield_value)
-        return converters
-
-    def convert_booleanfield_value(self, value, expression, connection, context):
-        if value in (0, 1):
-            value = bool(value)
-        return value
-
-    def convert_datefield_value(self, value, expression, connection, context):
-        if expression.output_field.get_internal_type() == 'DateField':
-            if isinstance(value, six.text_type):
-                value = self._convert_values_map['DateField'].to_python(value)
-            elif isinstance(value, datetime.datetime):
-                return value.date()
-        return value
-
-    def convert_datetimefield_value(self, value, expression, connection, context):
-        if expression.output_field.get_internal_type() == 'DateTimeField':
-            if isinstance(value, six.text_type):
-                value = self._convert_values_map['DateTimeField'].to_python(value)
-        return value
-
-    def convert_timefield_value(self, value, expression, connection, context):
-        if expression.output_field.get_internal_type() == 'TimeField':
-            if isinstance(value, six.text_type):
-                value = self._convert_values_map['TimeField'].to_python(value)
-            if isinstance(value, datetime.datetime):
-                value = value.time()
-        return value
-
-    def convert_uuidfield_value(self, value, expression, connection, context):
-        if expression.output_field.get_internal_type() == 'UUIDField':
-            if isinstance(value, six.string_types):
-                value = uuid.UUID(value.replace('-', ''))
-        return value
-
-    def convert_textfield_value(self, value, expression, connection, context):
-        if value is not None:
-            value = force_text(value)
-        return value
 
     def last_insert_id(self, cursor, table_name, pk_name):
         """
@@ -318,7 +300,7 @@ class DatabaseOperations(BaseDatabaseOperations):
         """
         if isinstance(value, datetime.datetime):
             # Strip '-' so SQL Server parses as YYYYMMDD for all languages/formats
-            val = value.isoformat(str(' ')).replace('-', '')
+            val = value.isoformat(b' ').replace('-', '')
             if value.microsecond:
                 # truncate to millisecond so SQL's 'datetime' can parse it
                 idx = val.rindex('.')
@@ -403,7 +385,8 @@ class DatabaseOperations(BaseDatabaseOperations):
         `value` is an int, containing the looked-up year.
         """
         first = datetime.datetime(value, 1, 1)
-        second = datetime.datetime(value, 12, 31, 23, 59, 59, 999999)
+        ms = 997000 if self.connection.use_legacy_date_fields else 999999
+        second = datetime.datetime(value, 12, 31, 23, 59, 59, ms)
         if settings.USE_TZ:
             tz = timezone.get_current_timezone()
             first = timezone.make_aware(first, tz)
@@ -422,18 +405,12 @@ class DatabaseOperations(BaseDatabaseOperations):
                 value = super(DatabaseOperations, self).convert_values(value, field)
         return value
 
-    if django.VERSION >= (1, 9, 0):
-        def bulk_insert_sql(self, fields, placeholder_rows):
-            placeholder_rows_sql = (", ".join(row) for row in placeholder_rows)
-            values_sql = ", ".join("(%s)" % sql for sql in placeholder_rows_sql)
-            return "VALUES " + values_sql
-    else:
-        def bulk_insert_sql(self, fields, num_values):
-            """
-            Format the SQL for bulk insert
-            """
-            items_sql = "(%s)" % ", ".join(["%s"] * len(fields))
-            return "VALUES " + ", ".join([items_sql] * num_values)
+    def bulk_insert_sql(self, fields, num_values):
+        """
+        Format the SQL for bulk insert
+        """
+        items_sql = "(%s)" % ", ".join(["%s"] * len(fields))
+        return "VALUES " + ", ".join([items_sql] * num_values)
 
     def max_name_length(self):
         """
@@ -492,43 +469,6 @@ class DatabaseOperations(BaseDatabaseOperations):
         if connector == '^':
             return 'POWER(%s)' % ','.join(sub_expressions)
         return super(DatabaseOperations, self).combine_expression(connector, sub_expressions)
-
-    def combine_duration_expression(self, connector, sub_expressions):
-        if connector not in ['+', '-']:
-            raise utils.DatabaseError('Invalid connector for timedelta: %s.' % connector)
-        # print 'combine_duration_expression', connector, [repr(x) for x in sub_expressions]
-        seconds = False
-        microseconds = False
-        sign = 1 if connector == '+' else -1
-        sql, timedelta = sub_expressions
-        if isinstance(sql, datetime.timedelta):
-            # normalize to sql + duration
-            sql, timedelta = timedelta, sql
-        if isinstance(timedelta, datetime.timedelta):
-            seconds = ((timedelta.days * 86400) + timedelta.seconds) * sign
-            microseconds = timedelta.microseconds * sign
-        if isinstance(timedelta, six.text_type):
-            seconds = "({} / 1000000)".format(timedelta)
-            # Need to fix %% escaping down through dbapi
-            microseconds = "({} %% 1000000)".format(timedelta)
-            if sign == -1:
-                microseconds = "(-1 * {})".format(microseconds)
-        out = sql
-        if seconds:
-            out = 'DATEADD(SECOND, {}, CAST({} as datetime2))'.format(seconds, sql)
-        if microseconds:
-            # DATEADD with datetime doesn't support ms, must cast up
-            out = 'DATEADD(MICROSECOND, {ms}, CAST({sql} as datetime2))'.format(
-                ms=microseconds,
-                sql=out,
-            )
-        return out
-
-        # return self.combine_expression(connector, sub_expressions)
-
-    def format_for_duration_arithmetic(self, sql):
-        """Do nothing here, we will handle it in the custom function."""
-        return sql
 
     def bulk_batch_size(self, fields, objs):
         """

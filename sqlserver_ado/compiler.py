@@ -31,9 +31,6 @@ _re_data_type_terminator = re.compile(
 )
 
 
-_re_constant = re.compile(r'\s*\(?\s*\d+\s*\)?\s*')
-
-
 class SQLCompiler(compiler.SQLCompiler):
     def resolve_columns(self, row, fields=()):
         values = []
@@ -48,10 +45,47 @@ class SQLCompiler(compiler.SQLCompiler):
             values.append(value)
         return row[:index_extra_select] + tuple(values)
 
-    def as_sql(self, with_limits=True, with_col_aliases=False, subquery=False):
+    def compile(self, node):
+        """
+        Added with Django 1.7 as a mechanism to evalute expressions
+        """
+        sql_function = getattr(node, 'sql_function', None)
+        if sql_function and sql_function in self.connection.ops._sql_function_overrides:
+            sql_function, sql_template = self.connection.ops._sql_function_overrides[sql_function]
+            if sql_function:
+                node.sql_function = sql_function
+            if sql_template:
+                node.sql_template = sql_template
+        return super(SQLCompiler, self).compile(node)
+
+    def _fix_aggregates(self):
+        """
+        MSSQL doesn't match the behavior of the other backends on a few of
+        the aggregate functions; different return type behavior, different
+        function names, etc.
+
+        MSSQL's implementation of AVG maintains datatype without proding. To
+        match behavior of other django backends, it needs to not drop remainders.
+        E.g. AVG([1, 2]) needs to yield 1.5, not 1
+        """
+        for alias, aggregate in self.query.aggregate_select.items():
+            sql_function = getattr(aggregate, 'sql_function', None)
+            if not sql_function or sql_function not in self.connection.ops._sql_function_overrides:
+                continue
+            sql_function, sql_template = self.connection.ops._sql_function_overrides[sql_function]
+            if sql_function:
+                self.query.aggregate_select[alias].sql_function = sql_function
+            if sql_template:
+                self.query.aggregate_select[alias].sql_template = sql_template
+
+    def as_sql(self, with_limits=True, with_col_aliases=False):
         # Django #12192 - Don't execute any DB query when QS slicing results in limit 0
         if with_limits and self.query.low_mark == self.query.high_mark:
             return '', ()
+
+        if NEEDS_AGGREGATES_FIX:
+            # Django 1.7+ provides SQLCompiler.compile as a hook
+            self._fix_aggregates()
 
         # Get out of the way if we're not a select query or there's no limiting involved.
         has_limit_offset = with_limits and (self.query.low_mark or self.query.high_mark is not None)
@@ -66,7 +100,6 @@ class SQLCompiler(compiler.SQLCompiler):
             sql, fields = super(SQLCompiler, self).as_sql(
                 with_limits=False,
                 with_col_aliases=with_col_aliases,
-                subquery=subquery,
             )
 
             if has_limit_offset:
@@ -94,12 +127,6 @@ class SQLCompiler(compiler.SQLCompiler):
                 return (None, [])
             return (None, [], [])
         return super(SQLCompiler, self).get_ordering()
-
-    def collapse_group_by(self, expressions, having):
-        expressions = super(SQLCompiler, self).collapse_group_by(expressions, having)
-        # MSSQL doesn't support having constants in the GROUP BY clause. Django
-        # does this for exists() queries that have GROUP BY.
-        return [x for x in expressions if not _re_constant.match(getattr(x, 'sql', ''))]
 
 
 class SQLInsertCompiler(compiler.SQLInsertCompiler, SQLCompiler):
@@ -196,4 +223,16 @@ class SQLUpdateCompiler(compiler.SQLUpdateCompiler, SQLCompiler):
 
 
 class SQLAggregateCompiler(compiler.SQLAggregateCompiler, SQLCompiler):
+    def as_sql(self, qn=None):
+        self._fix_aggregates()
+        return super(SQLAggregateCompiler, self).as_sql(qn=qn)
+
+
+class SQLDateCompiler(compiler.SQLDateCompiler, SQLCompiler):
+    pass
+
+try:
+    class SQLDateTimeCompiler(compiler.SQLDateTimeCompiler, SQLCompiler):
+        pass
+except AttributeError:
     pass

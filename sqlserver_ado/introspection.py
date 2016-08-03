@@ -1,10 +1,16 @@
 from __future__ import absolute_import, unicode_literals
 
-from django.db.backends.base.introspection import (
-    BaseDatabaseIntrospection, FieldInfo, TableInfo
-)
-
+from django.db.backends import BaseDatabaseIntrospection
 from . import ado_consts
+
+try:
+    # Added with Django 1.7
+    from django.db.backends import FileInfo  # NOQA
+except ImportError:
+    from collections import namedtuple
+    # Structure returned by the DB-API cursor.description interface (PEP 249)
+    FieldInfo = namedtuple('FieldInfo',
+        'name type_code display_size internal_size precision scale null_ok')
 
 AUTO_FIELD_MARKER = -1000
 BIG_AUTO_FIELD_MARKER = -1001
@@ -14,21 +20,23 @@ MONEY_FIELD_MARKER = -1002
 class DatabaseIntrospection(BaseDatabaseIntrospection):
     def get_field_type(self, data_type, description):
         field_type = self.data_types_reverse[data_type]
-        if (field_type == 'CharField' and description.internal_size is not None and description.internal_size > 8000):
+        if (field_type == 'CharField'
+                and description.internal_size is not None
+                and description.internal_size > 8000):
             field_type = 'TextField'
         return field_type
 
     def get_table_list(self, cursor):
         "Return a list of table and view names in the current database."
         cursor.execute("""\
-SELECT TABLE_NAME, 't'
+SELECT TABLE_NAME
 FROM INFORMATION_SCHEMA.TABLES
 WHERE TABLE_TYPE = 'BASE TABLE'
 UNION
-SELECT TABLE_NAME, 'v'
+SELECT TABLE_NAME
 FROM INFORMATION_SCHEMA.VIEWS
 """)
-        return [TableInfo(row[0], row[1]) for row in cursor.fetchall()]
+        return [row[0] for row in cursor.fetchall()]
 
     def _is_auto_field(self, cursor, table_name, column_name):
         """Check if a column is an identity column.
@@ -131,15 +139,46 @@ WHERE [TABLE_NAME] LIKE \'%s\'
         return dict([(d[0], i) for i, d in enumerate(self.get_table_description(cursor, table_name, False))])
 
     def get_relations(self, cursor, table_name):
-        """
-        Returns a dictionary of {field_name: (field_name_other_table, other_table)}
-        representing all relationships to the given table.
-        """
-        constraints = self.get_key_columns(cursor, table_name)
-        relations = {}
-        for my_fieldname, other_table, other_field in constraints:
-            relations[my_fieldname] = (other_field, other_table)
-        return relations
+        source_field_dict = self._name_to_index(cursor, table_name)
+
+        sql = """
+select
+    COLUMN_NAME = fk_cols.COLUMN_NAME,
+    REFERENCED_TABLE_NAME = pk.TABLE_NAME,
+    REFERENCED_COLUMN_NAME = pk_cols.COLUMN_NAME
+from INFORMATION_SCHEMA.REFERENTIAL_CONSTRAINTS ref_const
+join INFORMATION_SCHEMA.TABLE_CONSTRAINTS fk
+    on ref_const.CONSTRAINT_CATALOG = fk.CONSTRAINT_CATALOG
+    and ref_const.CONSTRAINT_SCHEMA = fk.CONSTRAINT_SCHEMA
+    and ref_const.CONSTRAINT_NAME = fk.CONSTRAINT_NAME
+    and fk.CONSTRAINT_TYPE = 'FOREIGN KEY'
+
+join INFORMATION_SCHEMA.TABLE_CONSTRAINTS pk
+    on ref_const.UNIQUE_CONSTRAINT_CATALOG = pk.CONSTRAINT_CATALOG
+    and ref_const.UNIQUE_CONSTRAINT_SCHEMA = pk.CONSTRAINT_SCHEMA
+    and ref_const.UNIQUE_CONSTRAINT_NAME = pk.CONSTRAINT_NAME
+    And pk.CONSTRAINT_TYPE = 'PRIMARY KEY'
+
+join INFORMATION_SCHEMA.KEY_COLUMN_USAGE fk_cols
+    on ref_const.CONSTRAINT_NAME = fk_cols.CONSTRAINT_NAME
+
+join INFORMATION_SCHEMA.KEY_COLUMN_USAGE pk_cols
+    on pk.CONSTRAINT_NAME = pk_cols.CONSTRAINT_NAME
+where
+    fk.TABLE_NAME = %s"""
+
+        cursor.execute(sql, [table_name])
+        relations = cursor.fetchall()
+        relation_map = dict()
+
+        for source_column, target_table, target_column in relations:
+            target_field_dict = self._name_to_index(cursor, target_table)
+            target_index = target_field_dict[target_column]
+            source_index = source_field_dict[source_column]
+
+            relation_map[source_index] = (target_index, target_table)
+
+        return relation_map
 
     def get_key_columns(self, cursor, table_name):
         """
@@ -297,8 +336,8 @@ where
         for id, name, ref_table_name in list(cursor.fetchall()):
             sql = """
             select cc.name, rc.name from sys.foreign_key_columns fkc
-            inner join sys.columns rc on
-                fkc.referenced_object_id = rc.object_id and fkc.referenced_column_id = rc.column_id
+            inner join sys.columns rc
+                on fkc.referenced_object_id = rc.object_id and fkc.referenced_column_id = rc.column_id
             inner join sys.columns cc on
                 fkc.parent_object_id = cc.object_id and fkc.parent_column_id = cc.column_id
             where fkc.constraint_object_id = %s

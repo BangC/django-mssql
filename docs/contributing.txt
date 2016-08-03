@@ -76,4 +76,4 @@ Uploading to PyPi
 To build and upload the source and wheel packages to
 http://pypi.python.org/pypi/django-mssql::
 
-	python setup.py sdist bdist_wheel upload --sign --identity="BAD0EDF8"
+	python setup.py sdist bdist_wheel upload

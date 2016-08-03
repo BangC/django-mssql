@@ -23,9 +23,9 @@ SQL 2008/2008r2 are support by django-mssql 1.6.x.
 Django Version
 --------------
 
-	* Django 1.8
+	* Django 1.7
 
-django-mssql 1.7 supports Django 1.7.
+
 django-mssql 1.6 supports Django 1.6.
 django-mssql 1.4 supports Django 1.4 and 1.5.
 

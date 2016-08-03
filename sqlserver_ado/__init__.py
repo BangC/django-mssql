@@ -1,6 +1,5 @@
 from __future__ import absolute_import, unicode_literals
 # following PEP 386
-__version__ = "1.8b1"
+__version__ = "1.7.1a"
 
 from . import patches  # NOQA
-from . import expressions  # NOQA
