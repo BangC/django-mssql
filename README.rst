@@ -8,7 +8,7 @@ Documentation is available at `django-mssql.readthedocs.org`_.
 Requirements
 ------------
 
-    * Python 2.7, 3.4
+    * Python 2.7, 3.4, 3.5
     * PyWin32_
     * SQL Server Management Studio or Microsoft Data Access Components (MDAC)
 
@@ -23,7 +23,7 @@ SQL 2008/2008r2 are support by django-mssql 1.6.x.
 Django Version
 --------------
 
-	* Django 1.7
+	* Django 1.7 -> 1.10
 
 
 django-mssql 1.6 supports Django 1.6.
