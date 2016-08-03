@@ -8,7 +8,7 @@ import django
 from django.conf import settings
 from django.core.exceptions import ImproperlyConfigured
 from django.db import connections
-from django.db.backends.creation import BaseDatabaseCreation
+from django.db.backends.base.creation import BaseDatabaseCreation
 from django.utils import six
 from django.utils.functional import cached_property
 

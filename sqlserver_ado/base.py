@@ -4,7 +4,11 @@ from __future__ import absolute_import, unicode_literals
 import warnings
 
 from django.core.exceptions import ImproperlyConfigured, ValidationError
-from django.db.backends import BaseDatabaseWrapper, BaseDatabaseFeatures, BaseDatabaseValidation, BaseDatabaseClient
+from django.db.backends.base.base import BaseDatabaseWrapper
+from django.db.backends.base.features import BaseDatabaseFeatures
+from django.db.backends.base.validation import BaseDatabaseValidation
+from django.db.backends.base.client import BaseDatabaseClient
+
 from django.db.utils import IntegrityError as DjangoIntegrityError, \
     InterfaceError as DjangoInterfaceError
 from django.utils.functional import cached_property

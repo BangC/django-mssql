@@ -4,7 +4,7 @@ import operator
 from django.db.backends.utils import truncate_name
 from django.db.models.fields.related import ManyToManyField
 from django.utils import six
-from django.utils.log import getLogger
+#from django.utils.log import getLogger
 from django.utils.six.moves import reduce
 from django.utils.text import force_text
 
@@ -16,7 +16,7 @@ except ImportError:
         pass
 
 
-logger = getLogger('django.db.backends.schema')
+#logger = getLogger('django.db.backends.schema')
 
 
 class DatabaseSchemaEditor(BaseDatabaseSchemaEditor):
